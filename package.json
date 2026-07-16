@@ -1,0 +1,31 @@
+{
+  "name": "sst-aws-vercel",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "sst dev",
+    "deploy": "sst deploy --stage production",
+    "deploy:dev": "sst deploy --stage dev",
+    "deploy:staging": "sst deploy --stage staging",
+    "console": "sst console",
+    "typecheck": "sst check",
+    "lint": "biome check .",
+    "format": "biome format --write ."
+  },
+  "workspaces": [
+    "packages/*"
+  ],
+  "devDependencies": {
+    "@aws-sdk/client-cloudwatch-logs": "^3.1088.0",
+    "@aws-sdk/credential-providers": "^3.1088.0",
+    "@tsconfig/node22": "^22.0.1",
+    "@types/node": "^26.1.1",
+    "sst": "^3.13.0",
+    "typescript": "^5.8.0"
+  },
+  "dependencies": {
+    "@aws-sdk/client-lambda": "^3.1088.0",
+    "@aws-sdk/client-s3": "^3.1088.0"
+  }
+}
