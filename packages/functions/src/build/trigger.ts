@@ -155,6 +155,7 @@ phases:
       ${nextStandaloneConfig}
       - echo "Uploading artifacts..."
       - aws s3 cp ${outputDir}/ s3://${Resource.AssetsBucket.name}/${deploymentId}/ --recursive --exclude "cache/*"
+      - if [ -d /tmp/repo/public ]; then aws s3 cp /tmp/repo/public/ s3://${Resource.AssetsBucket.name}/${deploymentId}/public/ --recursive; fi
       ${uploadStandalone}
       - echo "Build complete"
 artifacts:

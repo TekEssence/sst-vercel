@@ -37,12 +37,23 @@ function StatusBadge({ status }: { status: string }) {
   );
 }
 
+async function fetchLogs(id: string, endpoint: string): Promise<string | null> {
+  try {
+    const res = await fetch(`${getApiUrl()}/api/deployments/${id}/${endpoint}`);
+    const json = await res.json();
+    return json.data?.logs ?? null;
+  } catch {
+    return null;
+  }
+}
+
 export default function DeploymentDetail({ loaderData }: Route.ComponentProps) {
   const { deployment, initialLogs, initialRuntimeLogs } = loaderData;
   const [logs, setLogs] = useState(initialLogs);
   const [runtimeLogs, setRuntimeLogs] = useState(initialRuntimeLogs);
   const [tab, setTab] = useState<"build" | "runtime">("build");
   const [runtimeError, setRuntimeError] = useState("");
+  const [refreshing, setRefreshing] = useState(false);
 
   useEffect(() => {
     setLogs(initialLogs);
@@ -50,17 +61,17 @@ export default function DeploymentDetail({ loaderData }: Route.ComponentProps) {
 
   useEffect(() => {
     setRuntimeLogs(initialRuntimeLogs);
+    if (initialRuntimeLogs && !initialRuntimeLogs.startsWith("No runtime") && !initialRuntimeLogs.startsWith("Runtime logs not")) {
+      setRuntimeError("");
+    }
   }, [initialRuntimeLogs]);
 
   // Poll build logs while building
   useEffect(() => {
     if (deployment.status !== "building" && deployment.status !== "queued") return;
     const interval = setInterval(async () => {
-      try {
-        const res = await fetch(`${getApiUrl()}/api/deployments/${deployment.id}/logs`);
-        const json = await res.json();
-        if (json.data?.logs) setLogs(json.data.logs);
-      } catch {}
+      const result = await fetchLogs(deployment.id, "logs");
+      if (result) setLogs(result);
     }, 3000);
     return () => clearInterval(interval);
   }, [deployment.id, deployment.status]);
@@ -69,19 +80,37 @@ export default function DeploymentDetail({ loaderData }: Route.ComponentProps) {
   useEffect(() => {
     if (deployment.status !== "ready") return;
     const interval = setInterval(async () => {
-      try {
-        const res = await fetch(`${getApiUrl()}/api/deployments/${deployment.id}/runtime-logs`);
-        const json = await res.json();
-        if (json.data?.logs && !json.data.logs.startsWith("No runtime") && !json.data.logs.startsWith("Runtime logs not")) {
-          setRuntimeLogs(json.data.logs);
+      const result = await fetchLogs(deployment.id, "runtime-logs");
+      if (result) {
+        if (!result.startsWith("No runtime") && !result.startsWith("Runtime logs not")) {
+          setRuntimeLogs(result);
           setRuntimeError("");
-        } else if (json.data?.logs.startsWith("Runtime logs not")) {
-          setRuntimeError(json.data.logs);
+        } else if (result.startsWith("Runtime logs not")) {
+          setRuntimeError(result);
         }
-      } catch {}
+      }
     }, 5000);
     return () => clearInterval(interval);
   }, [deployment.id, deployment.status]);
+
+  async function handleRefresh() {
+    setRefreshing(true);
+    const endpoint = tab === "build" ? "logs" : "runtime-logs";
+    const result = await fetchLogs(deployment.id, endpoint);
+    if (result) {
+      if (tab === "build") {
+        setLogs(result);
+      } else {
+        if (!result.startsWith("No runtime") && !result.startsWith("Runtime logs not")) {
+          setRuntimeLogs(result);
+          setRuntimeError("");
+        } else if (result.startsWith("Runtime logs not")) {
+          setRuntimeError(result);
+        }
+      }
+    }
+    setRefreshing(false);
+  }
 
   return (
     <div>
@@ -145,26 +174,35 @@ export default function DeploymentDetail({ loaderData }: Route.ComponentProps) {
       </div>
 
       <div className="rounded-lg border border-gray-200 bg-white">
-        <div className="border-b border-gray-200 flex">
+        <div className="border-b border-gray-200 flex items-center justify-between">
+          <div className="flex">
+            <button
+              onClick={() => setTab("build")}
+              className={`px-4 py-3 text-sm font-semibold border-b-2 transition ${
+                tab === "build"
+                  ? "border-blue-500 text-blue-600"
+                  : "border-transparent text-gray-500 hover:text-gray-700"
+              }`}
+            >
+              Build Logs
+            </button>
+            <button
+              onClick={() => setTab("runtime")}
+              className={`px-4 py-3 text-sm font-semibold border-b-2 transition ${
+                tab === "runtime"
+                  ? "border-blue-500 text-blue-600"
+                  : "border-transparent text-gray-500 hover:text-gray-700"
+              }`}
+            >
+              Runtime Logs
+            </button>
+          </div>
           <button
-            onClick={() => setTab("build")}
-            className={`px-4 py-3 text-sm font-semibold border-b-2 transition ${
-              tab === "build"
-                ? "border-blue-500 text-blue-600"
-                : "border-transparent text-gray-500 hover:text-gray-700"
-            }`}
+            onClick={handleRefresh}
+            disabled={refreshing}
+            className="mr-3 rounded px-3 py-1.5 text-xs font-medium text-gray-500 hover:text-gray-700 hover:bg-gray-100 disabled:opacity-50"
           >
-            Build Logs
-          </button>
-          <button
-            onClick={() => setTab("runtime")}
-            className={`px-4 py-3 text-sm font-semibold border-b-2 transition ${
-              tab === "runtime"
-                ? "border-blue-500 text-blue-600"
-                : "border-transparent text-gray-500 hover:text-gray-700"
-            }`}
-          >
-            Runtime Logs
+            {refreshing ? "Refreshing..." : "Refresh"}
           </button>
         </div>
         {tab === "build" ? (

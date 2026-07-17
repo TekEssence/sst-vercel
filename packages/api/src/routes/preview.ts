@@ -160,7 +160,18 @@ export const preview = new Hono()
     const normalized = reqPath.replace(/^\/_next/, "");
     const isStaticAsset = relPath.startsWith("/_next/static/");
 
-    // Only check DynamoDB if we need SSR (skip for static assets)
+    // Serve Next.js image optimization from S3 (skip Lambda — avoids 400 errors)
+    if (reqPath.startsWith("/_next/image")) {
+      const imgUrl = c.req.query("url") || "";
+      const cleanUrl = imgUrl.replace(/^\/_preview\/[^/]+/, "").replace(/^\//, "");
+      const img = await tryGet(deploymentId, `public/${cleanUrl}`);
+      if (img) return c.newResponse(img.body, 200, { "Content-Type": img.contentType, "Cache-Control": "public, max-age=31536000, immutable", "x-served-by": "s3-static" });
+      // If image not in S3, redirect to the original (served by Lambda or S3)
+      // Redirect to the basePath-prefixed URL so preview router serves from S3 or Lambda
+      return c.redirect(`/_preview/${deploymentId}${imgUrl.startsWith("/") ? "" : "/"}${imgUrl}`, 302);
+    }
+
+    // Only check DynamoDB if we need SSR (skip for static assets and _next/image)
     if (!isStaticAsset) {
       const previewLambda = await lookupPreviewLambda(deploymentId);
       if (previewLambda) {
@@ -243,6 +254,23 @@ export const production = new Hono()
     const reqPath = relPath.split("?")[0];
     const normalized = reqPath.replace(/^\/_next/, "");
     const isStaticAsset = relPath.startsWith("/_next/static/");
+
+    // Serve Next.js image optimization from S3
+    if (reqPath.startsWith("/_next/image")) {
+      const imgUrl = c.req.query("url") || "";
+      const cleanUrl = imgUrl.replace(/^\/_production\/[^/]+/, "").replace(/^\//, "");
+      try {
+        const pRes = await ddb.send(
+          new GetCommand({ TableName: Resource.ProjectsTable.name, Key: { id: projectId } })
+        );
+        const prodDeploymentId = (pRes.Item as any)?.productionDeploymentId;
+        if (prodDeploymentId) {
+          const img = await tryGet(prodDeploymentId, `public/${cleanUrl}`);
+          if (img) return c.newResponse(img.body, 200, { "Content-Type": img.contentType, "Cache-Control": "public, max-age=31536000, immutable", "x-served-by": "s3-static" });
+        }
+      } catch {}
+      return c.redirect(`/_production/${projectId}${imgUrl.startsWith("/") ? "" : "/"}${imgUrl}`, 302);
+    }
 
     // For static assets, skip Lambda and serve from S3 directly
     if (!isStaticAsset) {
