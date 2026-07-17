@@ -32,7 +32,30 @@ export async function getSessionFromToken(token: string) {
   }
 }
 
+// If the request comes from a deployed app (preview/production URL), proxy to its SSR Lambda
+// so the app's own auth (Better Auth, etc.) handles it instead of the platform auth.
+async function proxyToApp(c: any): Promise<Response | null> {
+  const referer = c.req.header("referer") || "";
+  let match = referer.match(/\/_preview\/([^/]+)/);
+  if (match) {
+    const { invokePreviewLambda, lookupPreviewLambda } = await import("./preview");
+    const fnName = await lookupPreviewLambda(match[1]);
+    if (fnName) return invokePreviewLambda(fnName, c, `/_preview/${match[1]}${c.req.path}`);
+  }
+  match = referer.match(/\/_production\/([^/]+)/);
+  if (match) {
+    const { invokePreviewLambda, lookupProductionLambdaByProject } = await import("./preview");
+    const fnName = await lookupProductionLambdaByProject(match[1]);
+    if (fnName) return invokePreviewLambda(fnName, c, `/_production/${match[1]}${c.req.path}`);
+  }
+  return null;
+}
+
 async function sessionHandler(c: any) {
+  // If the request comes from a deployed app, let the app handle auth instead
+  const appResult = await proxyToApp(c);
+  if (appResult) return appResult;
+
   const authHeader = c.req.header("authorization") || "";
   const token = authHeader.replace("Bearer ", "");
   const session = await getSessionFromToken(token);
