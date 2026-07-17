@@ -231,6 +231,7 @@ export default $config({
     api.route("GET /api/auth/github", apiHandler);
     api.route("GET /api/auth/github/callback", apiHandler);
     api.route("GET /api/auth/session", apiHandler);
+    api.route("GET /api/auth/me", apiHandler);
     api.route("POST /api/auth/bypass", apiHandler);
     api.route("POST /api/auth/logout", apiHandler);
 

@@ -32,6 +32,25 @@ export async function getSessionFromToken(token: string) {
   }
 }
 
+async function sessionHandler(c: any) {
+  const authHeader = c.req.header("authorization") || "";
+  const token = authHeader.replace("Bearer ", "");
+  const session = await getSessionFromToken(token);
+  if (!session) {
+    return c.json({ success: false, error: "No session" }, 401);
+  }
+  return c.json({
+    success: true,
+    data: {
+      userId: session.userId,
+      name: session.name,
+      avatarUrl: session.avatarUrl,
+      login: session.login,
+      bypass: session.bypass,
+    },
+  });
+}
+
 export const auth = new Hono()
 
   .get("/github", async (c) => {
@@ -108,24 +127,8 @@ export const auth = new Hono()
     }
   })
 
-  .get("/session", async (c) => {
-    const authHeader = c.req.header("authorization") || "";
-    const token = authHeader.replace("Bearer ", "");
-    const session = await getSessionFromToken(token);
-    if (!session) {
-      return c.json({ success: false, error: "No session" }, 401);
-    }
-    return c.json({
-      success: true,
-      data: {
-        userId: session.userId,
-        name: session.name,
-        avatarUrl: session.avatarUrl,
-        login: session.login,
-        bypass: session.bypass,
-      },
-    });
-  })
+  .get("/session", sessionHandler)
+  .get("/me", sessionHandler)
 
   .post("/bypass", async (c) => {
     const token = generateToken();
