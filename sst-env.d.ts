@@ -59,6 +59,10 @@ declare module "sst" {
       "name": string
       "type": "sst.aws.Dynamo"
     }
+    "SessionsTable": {
+      "name": string
+      "type": "sst.aws.Dynamo"
+    }
     "UserPool": {
       "id": string
       "type": "sst.aws.CognitoUserPool"

@@ -8,6 +8,7 @@ import {
   DeleteCommand,
   ScanCommand,
   QueryCommand,
+  UpdateCommand,
 } from "@aws-sdk/lib-dynamodb";
 import { EventBridgeClient, PutEventsCommand } from "@aws-sdk/client-eventbridge";
 import { Resource } from "sst";
@@ -102,6 +103,9 @@ export const projects = new Hono()
 
   .post("/:id/deploy", async (c) => {
     const { id } = c.req.param();
+    const body = await c.req.json().catch(() => ({}));
+    const type = body.type === "production" ? "production" : "preview";
+    const MAX_DEPLOYS = 5;
 
     const project = await client.send(
       new GetCommand({ TableName: Resource.ProjectsTable.name, Key: { id } })
@@ -111,14 +115,40 @@ export const projects = new Hono()
       return c.json({ success: false, error: "Project not found" }, 404);
     }
 
-    // Fetch latest commit from GitHub (placeholder — Phase 2)
+    // Enforce max deployments per type
+    try {
+      const existing = await client.send(
+        new QueryCommand({
+          TableName: Resource.DeploymentsTable.name,
+          IndexName: "ByProject",
+          KeyConditionExpression: "projectId = :pid",
+          ExpressionAttributeValues: { ":pid": id },
+          ScanIndexForward: false,
+        })
+      );
+
+      const sameType = (existing.Items || [])
+        .filter((d: any) => d.type === type)
+        .sort((a: any, b: any) => a.createdAt.localeCompare(b.createdAt));
+
+      while (sameType.length >= MAX_DEPLOYS) {
+        const oldest = sameType.shift()!;
+        await client.send(
+          new DeleteCommand({ TableName: Resource.DeploymentsTable.name, Key: { id: oldest.id } })
+        );
+      }
+    } catch (err: any) {
+      console.error("Failed to enforce deployment limits:", err.message);
+    }
+
     const deployment = {
       id: randomUUID(),
       projectId: id,
+      type,
       status: "queued",
       branch: project.Item.branch ?? "main",
       commitSha: "pending",
-      commitMessage: "Manual deploy",
+      commitMessage: type === "production" ? "Production deploy" : "Manual deploy",
       commitAuthor: "unknown",
       buildLogs: "",
       previewUrl: null,
@@ -131,7 +161,6 @@ export const projects = new Hono()
       new PutCommand({ TableName: Resource.DeploymentsTable.name, Item: deployment })
     );
 
-    // Emit deployment.queued event
     await eventBridge.send(
       new PutEventsCommand({
         Entries: [
@@ -139,11 +168,142 @@ export const projects = new Hono()
             EventBusName: Resource.EventBus.name,
             Source: "api",
             DetailType: "deployment.queued",
-            Detail: JSON.stringify({ deploymentId: deployment.id, projectId: id }),
+            Detail: JSON.stringify({
+              deploymentId: deployment.id,
+              projectId: id,
+              type,
+            }),
           },
         ],
       })
     );
 
     return c.json({ success: true, data: deployment }, 201);
+  })
+
+  // ── Environment Variables ──────────────────────────────────
+  .get("/:id/env-vars", async (c) => {
+    const { id } = c.req.param();
+    const scope = c.req.query("scope") || "preview";
+    const field = scope === "production" ? "productionEnvVars" : "envVars";
+
+    const result = await client.send(
+      new GetCommand({ TableName: Resource.ProjectsTable.name, Key: { id } })
+    );
+    if (!result.Item) return c.json({ success: false, error: "Not found" }, 404);
+
+    const envVars = (result.Item as any)[field] || {};
+    const names = Object.keys(envVars);
+    return c.json({ success: true, data: names });
+  })
+
+  .post("/:id/env-vars", async (c) => {
+    const { id } = c.req.param();
+    const scope = c.req.query("scope") || "preview";
+    const field = scope === "production" ? "productionEnvVars" : "envVars";
+    const body = await c.req.json();
+    const vars = body.vars || {};
+
+    const result = await client.send(
+      new GetCommand({ TableName: Resource.ProjectsTable.name, Key: { id } })
+    );
+    if (!result.Item) return c.json({ success: false, error: "Not found" }, 404);
+
+    const existing = (result.Item as any)[field] || {};
+    const merged = { ...existing, ...vars };
+
+    await client.send(
+      new UpdateCommand({
+        TableName: Resource.ProjectsTable.name,
+        Key: { id },
+        UpdateExpression: `SET ${field} = :vars, updatedAt = :now`,
+        ExpressionAttributeValues: {
+          ":vars": merged,
+          ":now": new Date().toISOString(),
+        },
+      })
+    );
+
+    return c.json({ success: true, data: Object.keys(merged) });
+  })
+
+  .delete("/:id/env-vars/:name", async (c) => {
+    const { id, name } = c.req.param();
+    const scope = c.req.query("scope") || "preview";
+    const field = scope === "production" ? "productionEnvVars" : "envVars";
+
+    const result = await client.send(
+      new GetCommand({ TableName: Resource.ProjectsTable.name, Key: { id } })
+    );
+    if (!result.Item) return c.json({ success: false, error: "Not found" }, 404);
+
+    const existing = { ...((result.Item as any)[field] || {}) };
+    delete existing[name];
+
+    await client.send(
+      new UpdateCommand({
+        TableName: Resource.ProjectsTable.name,
+        Key: { id },
+        UpdateExpression: `SET ${field} = :vars, updatedAt = :now`,
+        ExpressionAttributeValues: {
+          ":vars": existing,
+          ":now": new Date().toISOString(),
+        },
+      })
+    );
+
+    return c.json({ success: true });
+  })
+
+  .post("/:id/env-vars/copy-to-production", async (c) => {
+    const { id } = c.req.param();
+    const result = await client.send(
+      new GetCommand({ TableName: Resource.ProjectsTable.name, Key: { id } })
+    );
+    if (!result.Item) return c.json({ success: false, error: "Not found" }, 404);
+
+    const previewVars = (result.Item as any).envVars || {};
+    await client.send(
+      new UpdateCommand({
+        TableName: Resource.ProjectsTable.name,
+        Key: { id },
+        UpdateExpression: "SET productionEnvVars = :vars, updatedAt = :now",
+        ExpressionAttributeValues: {
+          ":vars": previewVars,
+          ":now": new Date().toISOString(),
+        },
+      })
+    );
+
+    return c.json({ success: true, data: Object.keys(previewVars) });
+  })
+
+  // ── Production ─────────────────────────────────────────────
+  .post("/:id/promote", async (c) => {
+    const { id } = c.req.param();
+    const body = await c.req.json().catch(() => ({}));
+    const deploymentId = body.deploymentId;
+    if (!deploymentId) return c.json({ success: false, error: "deploymentId required" }, 400);
+
+    // Verify deployment exists
+    const depResult = await client.send(
+      new GetCommand({ TableName: Resource.DeploymentsTable.name, Key: { id: deploymentId } })
+    );
+    if (!depResult.Item) return c.json({ success: false, error: "Deployment not found" }, 404);
+
+    // Emit event for BuildComplete to handle promotion
+    await eventBridge.send(
+      new PutEventsCommand({
+        Entries: [
+          {
+            EventBusName: Resource.EventBus.name,
+            Source: "api",
+            DetailType: "deployment.promote",
+            Detail: JSON.stringify({ deploymentId, projectId: id }),
+          },
+        ],
+      })
+    );
+
+    return c.json({ success: true, message: "Promotion started" });
   });

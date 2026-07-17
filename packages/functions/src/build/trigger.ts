@@ -20,6 +20,7 @@ interface EventBridgeEvent {
   detail: {
     deploymentId: string;
     projectId: string;
+    type?: string;
     repoUrl?: string;
     branch?: string;
     commitSha?: string;
@@ -30,7 +31,8 @@ interface EventBridgeEvent {
 }
 
 export async function handler(event: EventBridgeEvent) {
-  const { deploymentId, projectId } = event.detail;
+  const { deploymentId, projectId, type } = event.detail;
+  const deploymentType = type || "preview";
 
   const [deploymentRes, projectRes] = await Promise.all([
     client.send(
@@ -54,6 +56,10 @@ export async function handler(event: EventBridgeEvent) {
   const installCmd = project.installCommand ?? "npm ci";
   const buildCmd = project.buildCommand ?? "npm run build";
   let outputDir = project.outputDir ?? "dist";
+  const deployBranch = deployment.branch ?? "main";
+  const projectEnvVars: Record<string, string> = deployBranch === "main"
+    ? (project as any).productionEnvVars || {}
+    : (project as any).envVars || {};
 
   // Auto-detect framework output dir from package.json (overrides project setting)
   try {
@@ -96,25 +102,31 @@ export async function handler(event: EventBridgeEvent) {
       - node /tmp/standalone-wrap.mjs
       - echo "Rebuilding with standalone output..."
       - npx next build
+      - echo "Patching SQLite paths to /tmp/ (Lambda writable directory)..."
+      - node -e "const fs=require('fs'),p=require('path');const dirs=['.next/server','.next/standalone/.next/server'];dirs.forEach(d=>{try{fs.statSync(d)}catch{return};console.log('Scanning:',d);(function w(d){fs.readdirSync(d,{withFileTypes:1}).forEach(e=>{let f=p.join(d,e.name);e.isDirectory()?w(f):e.isFile()&&(e.name.endsWith('.js')||e.name.endsWith('.mjs'))?(c=fs.readFileSync(f,'utf-8'),n=c.replace(/\"sqlite\.db\"/g,'\"/tmp/sqlite.db\"'),c!==n&&(fs.writeFileSync(f,n),console.log('Patched:',f))):0})})(d)})"
       - echo "BASE64_RUNSH" | base64 -d > .next/standalone/run.sh && chmod +x .next/standalone/run.sh
       - cd .next/standalone && zip -r /tmp/standalone.zip . && cd /tmp/repo
 ` : "";
 
+  const deployBasePath = deploymentType === "production" 
+    ? `/_production/${projectId}`
+    : `/_preview/${deploymentId}`;
   const standaloneWrapScript = `
 import fs from "fs";
 const candidates = ["next.config.js","next.config.mjs","next.config.ts","next.config.cjs"];
 const existing = candidates.find(f => fs.existsSync(f));
+const basePathEnv = process.env.DEPLOY_BASE_PATH || "";
 if (existing) {
   const isEsm = existing.endsWith(".mjs") || existing.endsWith(".ts");
   const origName = "_orig_" + existing;
   fs.renameSync(existing, origName);
   if (isEsm) {
-    fs.writeFileSync(existing, \`import cfg from './\${origName}';\\nexport default { ...cfg, output: 'standalone', typescript: { ignoreBuildErrors: true } };\`);
+    fs.writeFileSync(existing, \`import cfg from './\${origName}';\\nexport default { ...cfg, output: 'standalone', typescript: { ignoreBuildErrors: true }, basePath: '\${basePathEnv}', assetPrefix: '\${basePathEnv}' };\`);
   } else {
-    fs.writeFileSync(existing, \`const cfg = require('./\${origName}');\\nmodule.exports = { ...cfg, output: 'standalone', typescript: { ignoreBuildErrors: true } };\`);
+    fs.writeFileSync(existing, \`const cfg = require('./\${origName}');\\nmodule.exports = { ...cfg, output: 'standalone', typescript: { ignoreBuildErrors: true }, basePath: '\${basePathEnv}', assetPrefix: '\${basePathEnv}' };\`);
   }
 } else {
-  fs.writeFileSync("next.config.js", 'module.exports = { output: "standalone" };');
+  fs.writeFileSync("next.config.js", \`module.exports = { output: "standalone", basePath: '\${basePathEnv}', assetPrefix: '\${basePathEnv}' };\`);
 }
 `.trim();
   const standaloneWrapB64 = Buffer.from(standaloneWrapScript).toString("base64");
@@ -161,6 +173,13 @@ artifacts:
         { name: "DEPLOYMENT_ID", value: deploymentId, type: "PLAINTEXT" },
         { name: "PROJECT_ID", value: projectId, type: "PLAINTEXT" },
         { name: "OUTPUT_DIR", value: outputDir, type: "PLAINTEXT" },
+        { name: "DEPLOY_BASE_PATH", value: deployBasePath, type: "PLAINTEXT" },
+        { name: "DEPLOYMENT_TYPE", value: deploymentType, type: "PLAINTEXT" },
+        ...Object.entries(projectEnvVars).map(([k, v]) => ({
+          name: k,
+          value: String(v),
+          type: "PLAINTEXT" as const,
+        })),
       ],
     })
   );

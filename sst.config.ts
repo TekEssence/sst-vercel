@@ -60,6 +60,18 @@ export default $config({
       },
     });
 
+    const sessionsTable = new sst.aws.Dynamo("SessionsTable", {
+      fields: {
+        id: "string",
+        userId: "string",
+        createdAt: "string",
+      },
+      primaryIndex: { hashKey: "id" },
+      globalIndexes: {
+        ByUser: { hashKey: "userId", rangeKey: "createdAt" },
+      },
+    });
+
     // ── Auth ─────────────────────────────────────────────────
     const userPool = new sst.aws.CognitoUserPool("UserPool", {
       usernames: ["email"],
@@ -172,19 +184,31 @@ export default $config({
 
     const apiHandler = {
       handler: "packages/api/src/index.handler",
-      link: [projectsTable, deploymentsTable, domainsTable, bus, buildBucket, assetsBucket],
+      link: [projectsTable, deploymentsTable, domainsTable, sessionsTable, bus, buildBucket, assetsBucket],
+      timeout: "30 seconds",
       environment: {
         USER_POOL_ID: userPool.id,
         USER_POOL_CLIENT_ID: userPoolClient.id,
+        GITHUB_CLIENT_ID: process.env.GITHUB_CLIENT_ID || "",
+        GITHUB_CLIENT_SECRET: process.env.GITHUB_CLIENT_SECRET || "",
+        APP_URL: api.url,
       },
       permissions: [
         {
           actions: ["logs:GetLogEvents", "logs:DescribeLogStreams", "logs:FilterLogEvents"],
-          resources: [$interpolate`arn:aws:logs:*:*:log-group:/aws/codebuild/*:*`],
+          resources: [
+            $interpolate`arn:aws:logs:*:*:log-group:/aws/codebuild/*:*`,
+            $interpolate`arn:aws:logs:*:*:log-group:/aws/lambda/sst-aws-vercel-dev-BuildCompleteFunction*:*`,
+            $interpolate`arn:aws:logs:*:*:log-group:/aws/lambda/preview-*:*`,
+            $interpolate`arn:aws:logs:*:*:log-group:/aws/lambda/production-*:*`,
+          ],
         },
         {
           actions: ["lambda:InvokeFunction"],
-          resources: [$interpolate`arn:aws:lambda:*:*:function:preview-*`],
+          resources: [
+            $interpolate`arn:aws:lambda:*:*:function:preview-*`,
+            $interpolate`arn:aws:lambda:*:*:function:production-*`,
+          ],
         },
       ],
     };
@@ -198,12 +222,41 @@ export default $config({
     api.route("GET /api/projects/{id}/deployments", apiHandler);
     api.route("GET /api/deployments/{id}", apiHandler);
     api.route("GET /api/deployments/{id}/logs", apiHandler);
+    api.route("GET /api/deployments/{id}/deployment-logs", apiHandler);
+    api.route("GET /api/deployments/{id}/runtime-logs", apiHandler);
     api.route("POST /api/detect-framework", apiHandler);
     api.route("POST /api/webhooks/github", apiHandler);
+
+    // Auth
+    api.route("GET /api/auth/github", apiHandler);
+    api.route("GET /api/auth/github/callback", apiHandler);
+    api.route("GET /api/auth/session", apiHandler);
+    api.route("POST /api/auth/bypass", apiHandler);
+    api.route("POST /api/auth/logout", apiHandler);
+
     api.route("POST /api/projects/{id}/domains", apiHandler);
     api.route("DELETE /api/projects/{id}/domains/{domain}", apiHandler);
     api.route("GET /api/projects/{id}/domains", apiHandler);
-    api.route("GET /_preview/{proxy+}", apiHandler);
+    api.route("ANY /_preview/{proxy+}", apiHandler);
+    api.route("ANY /_production/{proxy+}", apiHandler);
+
+    // Env var management
+    api.route("GET /api/projects/{id}/env-vars", apiHandler);
+    api.route("POST /api/projects/{id}/env-vars", apiHandler);
+    api.route("DELETE /api/projects/{id}/env-vars/{name}", apiHandler);
+
+    // Promote to production
+    api.route("POST /api/projects/{id}/promote", apiHandler);
+
+    // Copy env vars from preview to production
+    api.route("POST /api/projects/{id}/env-vars/copy-to-production", apiHandler);
+
+    // Catch-all for app API routes (proxied to SSR Lambda)
+    api.route("GET /api/{proxy+}", apiHandler);
+    api.route("POST /api/{proxy+}", apiHandler);
+    api.route("PATCH /api/{proxy+}", apiHandler);
+    api.route("DELETE /api/{proxy+}", apiHandler);
+    api.route("PUT /api/{proxy+}", apiHandler);
 
     // ── Preview Lambda Infrastructure ────────────────────────
     const previewLambdaRole = new aws.iam.Role("PreviewLambdaRole", {
@@ -249,7 +302,7 @@ export default $config({
 
     const buildComplete = new sst.aws.Function("BuildComplete", {
       handler: "packages/functions/src/build/complete.handler",
-      link: [deploymentsTable, assetsBucket],
+      link: [projectsTable, deploymentsTable, assetsBucket],
       environment: {
         PREVIEW_URL_SSM_PARAM: previewUrlParam.name,
         PREVIEW_LAMBDA_ROLE_ARN: previewLambdaRole.arn,
@@ -275,12 +328,15 @@ export default $config({
         {
           actions: [
             "lambda:CreateFunction",
-            "lambda:AddPermission",
+            "lambda:UpdateFunctionCode",
+            "lambda:UpdateFunctionConfiguration",
             "lambda:DeleteFunction",
-            "lambda:CreateFunctionUrlConfig",
-            "lambda:AddPermission",
+            "lambda:GetFunction",
           ],
-          resources: [$interpolate`arn:aws:lambda:*:*:function:preview-*`],
+          resources: [
+            $interpolate`arn:aws:lambda:*:*:function:preview-*`,
+            $interpolate`arn:aws:lambda:*:*:function:production-*`,
+          ],
         },
         {
           actions: ["iam:PassRole"],

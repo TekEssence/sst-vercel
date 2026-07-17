@@ -5,7 +5,11 @@ import {
   GetCommand,
   QueryCommand,
 } from "@aws-sdk/lib-dynamodb";
-import { CloudWatchLogsClient, GetLogEventsCommand } from "@aws-sdk/client-cloudwatch-logs";
+import {
+  CloudWatchLogsClient,
+  GetLogEventsCommand,
+  FilterLogEventsCommand,
+} from "@aws-sdk/client-cloudwatch-logs";
 import { Resource } from "sst";
 
 const client = DynamoDBDocumentClient.from(new DynamoDBClient({}));
@@ -79,5 +83,65 @@ export const deployments = new Hono()
       return c.json({ success: true, data: { logs } });
     } catch {
       return c.json({ success: true, data: { logs: "" } });
+    }
+  })
+
+  .get("/:id/deployment-logs", async (c) => {
+    const { id } = c.req.param();
+    const result = await client.send(
+      new GetCommand({ TableName: Resource.DeploymentsTable.name, Key: { id } })
+    );
+
+    if (!result.Item) {
+      return c.json({ success: false, error: "Deployment not found" }, 404);
+    }
+
+    const storedLogs: string[] = (result.Item as any).deploymentLogs;
+
+    if (!storedLogs || storedLogs.length === 0) {
+      return c.json({ success: true, data: { logs: "Deployment logs not available yet." } });
+    }
+
+    return c.json({ success: true, data: { logs: storedLogs.join("\n") } });
+  })
+
+  .get("/:id/runtime-logs", async (c) => {
+    const { id } = c.req.param();
+    const result = await client.send(
+      new GetCommand({ TableName: Resource.DeploymentsTable.name, Key: { id } })
+    );
+
+    if (!result.Item) {
+      return c.json({ success: false, error: "Deployment not found" }, 404);
+    }
+
+    const dep = result.Item as any;
+    const fnName = dep.type === "production"
+      ? `production-${dep.projectId}`
+      : `preview-${id}`;
+    const logGroup = `/aws/lambda/${fnName}`;
+
+    try {
+      // Fetch latest log events from the past hour
+      const logResult = await logsClient.send(
+        new FilterLogEventsCommand({
+          logGroupName: logGroup,
+          limit: 200,
+          startTime: Date.now() - 30 * 60 * 1000,
+        })
+      );
+
+      const events = (logResult.events ?? [])
+        .sort((a: any, b: any) => (a.timestamp || 0) - (b.timestamp || 0))
+        .map((e: any) => {
+          const ts = new Date(e.timestamp).toISOString();
+          return `[${ts}] ${e.message}`;
+        })
+        .join("");
+
+      return c.json({ success: true, data: { logs: events || "No runtime logs found." } });
+    } catch (err: any) {
+      console.error("Runtime logs fetch failed:", logGroup, err.message);
+      return c.json({ success: true, data: { logs: "Runtime logs not available yet." } });
     }
   });

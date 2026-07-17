@@ -6,7 +6,7 @@ import { DynamoDBDocumentClient, GetCommand } from "@aws-sdk/lib-dynamodb";
 import { Resource } from "sst";
 
 const s3 = new S3Client({});
-const lambda = new LambdaClient({});
+const lambda = new LambdaClient({ maxAttempts: 3 });
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 
 function getContentType(filename: string): string {
@@ -34,6 +34,22 @@ function getContentType(filename: string): string {
   return types[ext] || "application/octet-stream";
 }
 
+export async function lookupPreviewLambda(
+  deploymentId: string
+): Promise<string | undefined> {
+  try {
+    const depResult = await ddb.send(
+      new GetCommand({
+        TableName: Resource.DeploymentsTable.name,
+        Key: { id: deploymentId },
+      })
+    );
+    return depResult.Item?.previewLambda;
+  } catch {
+    return undefined;
+  }
+}
+
 async function tryGet(
   deploymentId: string,
   key: string
@@ -51,11 +67,13 @@ async function tryGet(
         body,
         contentType: result.ContentType || getContentType(key),
       };
-  } catch {}
+  } catch (err: any) {
+    console.error(`tryGet S3 error [${deploymentId}/${key}]:`, err.message, err.$metadata?.httpStatusCode || "");
+  }
   return null;
 }
 
-async function invokePreviewLambda(
+export async function invokePreviewLambda(
   fnName: string,
   c: any,
   relPath: string
@@ -129,7 +147,7 @@ async function invokePreviewLambda(
 
 export const preview = new Hono()
 
-  .get("/*", async (c) => {
+  .all("/*", async (c) => {
     const path = c.req.path.replace("/_preview/", "");
     const [deploymentId, ...rest] = path.split("/");
     const relPath = "/" + rest.join("/");
@@ -142,20 +160,16 @@ export const preview = new Hono()
     const normalized = reqPath.replace(/^\/_next/, "");
     const isStaticAsset = relPath.startsWith("/_next/static/");
 
-    // Check if this deployment has a preview Lambda for SSR
-    let previewLambda: string | undefined;
-    try {
-      const depResult = await ddb.send(
-        new GetCommand({
-          TableName: Resource.DeploymentsTable.name,
-          Key: { id: deploymentId },
-        })
-      );
-      previewLambda = depResult.Item?.previewLambda;
-    } catch {}
-    if (previewLambda && !isStaticAsset) {
-      const ssrResult = await invokePreviewLambda(previewLambda, c, relPath);
-      if (ssrResult) return ssrResult;
+    // Only check DynamoDB if we need SSR (skip for static assets)
+    if (!isStaticAsset) {
+      const previewLambda = await lookupPreviewLambda(deploymentId);
+      if (previewLambda) {
+        const ssrResult = await invokePreviewLambda(previewLambda, c, c.req.path);
+        if (ssrResult) {
+          ssrResult.headers.set("x-served-by", "ssr-lambda");
+          return ssrResult;
+        }
+      }
     }
 
     // Fall back to static file serving
@@ -163,7 +177,7 @@ export const preview = new Hono()
     // Root path → serve main HTML
     if (normalized === "/" || normalized === "") {
       const obj = await tryGet(deploymentId, "server/app/index.html");
-      if (obj) return c.newResponse(obj.body, 200, { "Content-Type": "text/html" });
+      if (obj) return c.newResponse(obj.body, 200, { "Content-Type": "text/html", "x-served-by": "s3-static" });
       return c.text("Not found", 404);
     }
 
@@ -173,13 +187,17 @@ export const preview = new Hono()
       if (bodyFile)
         return c.newResponse(bodyFile.body, 200, {
           "Content-Type": bodyFile.contentType,
+          "x-served-by": "s3-static",
         });
     }
 
     // Try exact match in S3 (handles static/... and server/... files)
     const exact = await tryGet(deploymentId, normalized.replace(/^\//, ""));
-    if (exact)
-      return c.newResponse(exact.body, 200, { "Content-Type": exact.contentType });
+    if (exact) {
+      const headers: Record<string, string> = { "Content-Type": exact.contentType, "x-served-by": "s3-static" };
+      if (isStaticAsset) headers["Cache-Control"] = "public, max-age=31536000, immutable";
+      return c.newResponse(exact.body, 200, headers);
+    }
 
     // Try as HTML page under server/app/
     if (!normalized.includes(".") && !normalized.startsWith("/api/")) {
@@ -187,6 +205,101 @@ export const preview = new Hono()
       if (htmlPage)
         return c.newResponse(htmlPage.body, 200, { "Content-Type": "text/html" });
       // SPA fallback — serve root HTML for client-side routing
+      const fallback = await tryGet(deploymentId, "server/app/index.html");
+      if (fallback)
+        return c.newResponse(fallback.body, 200, { "Content-Type": "text/html" });
+    }
+
+    return c.text("Not found", 404);
+  });
+
+export async function lookupProductionLambdaByProject(
+  projectId: string
+): Promise<string | undefined> {
+  try {
+    const depResult = await ddb.send(
+      new GetCommand({
+        TableName: Resource.ProjectsTable.name,
+        Key: { id: projectId },
+      })
+    );
+    return (depResult.Item as any)?.productionLambda;
+  } catch {
+    return undefined;
+  }
+}
+
+export const production = new Hono()
+
+  .all("/*", async (c) => {
+    const path = c.req.path.replace("/_production/", "");
+    const [projectId, ...rest] = path.split("/");
+    const relPath = "/" + rest.join("/");
+
+    if (!projectId) {
+      return c.text("Not found", 404);
+    }
+
+    const reqPath = relPath.split("?")[0];
+    const normalized = reqPath.replace(/^\/_next/, "");
+    const isStaticAsset = relPath.startsWith("/_next/static/");
+
+    // For static assets, skip Lambda and serve from S3 directly
+    if (!isStaticAsset) {
+      const fnName = await lookupProductionLambdaByProject(projectId);
+      if (fnName) {
+        const ssrResult = await invokePreviewLambda(fnName, c, c.req.path);
+        if (ssrResult) {
+          ssrResult.headers.set("x-served-by", "ssr-lambda");
+          return ssrResult;
+        }
+      }
+    }
+
+    // Fallback: serve static files from latest production deployment
+    let deploymentId: string | undefined;
+    try {
+      const depResult = await ddb.send(
+        new GetCommand({
+          TableName: Resource.ProjectsTable.name,
+          Key: { id: projectId },
+        })
+      );
+      deploymentId = (depResult.Item as any)?.productionDeploymentId;
+    } catch {}
+
+    if (!deploymentId) return c.text("Not found", 404);
+
+    // Root path → serve main HTML
+    if (normalized === "/" || normalized === "") {
+      const obj = await tryGet(deploymentId, "server/app/index.html");
+      if (obj) return c.newResponse(obj.body, 200, { "Content-Type": "text/html", "x-served-by": "s3-static" });
+      return c.text("Not found", 404);
+    }
+
+    // Try serving a .body file (prerendered response body from Next.js)
+    if (!normalized.includes(".")) {
+      const bodyFile = await tryGet(deploymentId, `server/app${normalized}.body`);
+      if (bodyFile)
+        return c.newResponse(bodyFile.body, 200, {
+          "Content-Type": bodyFile.contentType,
+          "x-served-by": "s3-static",
+        });
+    }
+
+    // Try exact match in S3 (handles static/... and server/... files)
+    const exact = await tryGet(deploymentId, normalized.replace(/^\//, ""));
+    if (exact) {
+      const headers: Record<string, string> = { "Content-Type": exact.contentType, "x-served-by": "s3-static" };
+      if (isStaticAsset) headers["Cache-Control"] = "public, max-age=31536000, immutable";
+      return c.newResponse(exact.body, 200, headers);
+    }
+
+    // Try as HTML page under server/app/
+    if (!normalized.includes(".") && !normalized.startsWith("/api/")) {
+      const htmlPage = await tryGet(deploymentId, `server/app${normalized}.html`);
+      if (htmlPage)
+        return c.newResponse(htmlPage.body, 200, { "Content-Type": "text/html" });
       const fallback = await tryGet(deploymentId, "server/app/index.html");
       if (fallback)
         return c.newResponse(fallback.body, 200, { "Content-Type": "text/html" });
