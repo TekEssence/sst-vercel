@@ -169,6 +169,10 @@ export async function handler(event: any) {
       allEnvVars[key] = String(value);
     }
 
+    // Dynamically set BETTER_AUTH_URL to the deployment URL (avoids chicken-and-egg with user-set env vars)
+    const deployUrl = `${API_URL.replace(/\/$/, "")}/${deploymentType === "production" ? `_production/${projectId}` : `_preview/${deploymentId}`}/`;
+    allEnvVars.BETTER_AUTH_URL = deployUrl;
+
     const isProduction = deploymentType === "production";
 
     if (isProduction) {

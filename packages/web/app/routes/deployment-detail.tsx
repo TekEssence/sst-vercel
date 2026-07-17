@@ -66,12 +66,21 @@ export default function DeploymentDetail({ loaderData }: Route.ComponentProps) {
     }
   }, [initialRuntimeLogs]);
 
-  // Poll build logs while building
+  // Poll build logs while building + auto-refresh on completion
   useEffect(() => {
     if (deployment.status !== "building" && deployment.status !== "queued") return;
     const interval = setInterval(async () => {
-      const result = await fetchLogs(deployment.id, "logs");
-      if (result) setLogs(result);
+      const [logsResult, statusRes] = await Promise.all([
+        fetchLogs(deployment.id, "logs"),
+        fetch(`${getApiUrl()}/api/deployments/${deployment.id}`).catch(() => null),
+      ]);
+      if (logsResult) setLogs(logsResult);
+      if (statusRes && statusRes.ok) {
+        const json = await statusRes.json();
+        if (json?.data?.status && !["building", "queued"].includes(json.data.status)) {
+          window.location.reload();
+        }
+      }
     }, 3000);
     return () => clearInterval(interval);
   }, [deployment.id, deployment.status]);
