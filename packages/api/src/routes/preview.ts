@@ -84,12 +84,14 @@ export async function invokePreviewLambda(
     c.req.raw.headers.forEach((v: string, k: string) => { headers[k] = v; });
     const body = await c.req.text().catch(() => "");
 
+    const cookies = headers["cookie"] ? headers["cookie"].split(";").map(c => c.trim()).filter(Boolean) : undefined;
     const event = {
       version: "2.0",
       routeKey: "$default",
       rawPath: relPath,
       rawQueryString: rawQuery,
       headers,
+      cookies,
       queryStringParameters: Object.fromEntries(new URL(c.req.url).searchParams),
       requestContext: {
         accountId: "anonymous",
@@ -126,10 +128,14 @@ export async function invokePreviewLambda(
     }
 
     const response = JSON.parse(Buffer.from(result.Payload).toString());
-    const resHeaders: Record<string, string> = {};
+    const resHeaders = new Headers();
     if (response.headers) {
       for (const [k, v] of Object.entries(response.headers)) {
-        if (typeof v === "string") resHeaders[k] = v;
+        if (Array.isArray(v)) {
+          for (const val of v) resHeaders.append(k, val);
+        } else if (typeof v === "string") {
+          resHeaders.set(k, v);
+        }
       }
     }
 
