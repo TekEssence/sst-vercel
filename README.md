@@ -43,7 +43,7 @@ npx sst deploy --stage dev
 
 # 4. Open the dashboard
 # After deploy completes, you'll see:
-#   DashboardWeb: https://d2xw74rl75xi5.cloudfront.net
+#   DashboardWeb: https://xxxxxxx.cloudfront.net
 #   ApiGateway:   https://xxxxxx.execute-api.us-east-1.amazonaws.com
 ```
 
@@ -90,7 +90,7 @@ This provisions all AWS resources (~3-5 min):
 ### 3. Open the Dashboard
 
 ```
-DashboardWeb: https://d2xw74rl75xi5.cloudfront.net
+DashboardWeb: https://xxxxxxx.cloudfront.net
 ```
 
 Click **"Continue without login"** to use bypass mode, or set up GitHub OAuth (see below).
@@ -107,7 +107,7 @@ Click **"Continue without login"** to use bypass mode, or set up GitHub OAuth (s
 To enable sign-in with GitHub:
 
 1. Create a [GitHub OAuth App](https://github.com/settings/developers)
-   - Homepage URL: `https://d2xw74rl75xi5.cloudfront.net`
+   - Homepage URL: `https://xxxxxxx.cloudfront.net`
    - Authorization callback URL: `https://xxxxxx.execute-api.us-east-1.amazonaws.com/api/auth/github/callback`
 
 2. Deploy with credentials:
