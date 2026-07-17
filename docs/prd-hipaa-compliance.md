@@ -66,14 +66,13 @@ All traffic already uses TLS 1.2+ (API Gateway, CloudFront). No changes needed.
 
 ### Network
 
+Lambda functions run in an isolated execution environment by default and don't require a VPC for network isolation. All external API calls (GitHub OAuth, 3rd-party services) work without a VPC. A VPC with NAT Gateway is **not needed** for HIPAA compliance.
+
 | Action | Cost |
 |--------|------|
-| VPC with private subnets for all Lambdas | Free |
-| NAT Gateway for internet access from private subnets | ~$32/mo |
-| VPC Endpoints (DynamoDB, S3, CloudWatch, Lambda) | ~$7/mo (4 endpoints × $1.75) |
-| WAF on API Gateway | ~$6/mo + $0.60/1M requests |
+| WAF on API Gateway (optional — rate limiting, IP blocklists) | ~$6/mo + $0.60/1M requests |
 | Shield Advanced (optional) | $3000/yr |
-| **Total network changes** | **~$45/mo** |
+| **Total network** | **~$6/mo** (or $0 if WAF is skipped) |
 
 ---
 
@@ -133,13 +132,13 @@ These have no direct AWS cost but require organizational investment:
 | Category | Current Est. | HIPAA-Compliant Est. | Delta |
 |----------|-------------|----------------------|-------|
 | KMS | $0 | $1 | +$1 |
-| VPC + NAT Gateway | $0 | $32 | +$32 |
-| VPC Endpoints | $0 | $7 | +$7 |
-| WAF | $0 | $6 | +$6 |
+| WAF (optional) | $0 | $6 | +$6 |
 | CloudTrail | $0 | $7 | +$7 |
 | AWS Config | $0 | $3 | +$3 |
 | DynamoDB PITR | $0 | $5 | +$5 |
-| **AWS total** | **~$100/mo** | **~$161/mo** | **+$61/mo** |
+| **AWS total** | **~$100/mo** | **~$122/mo** | **+$22/mo** |
+
+> **VPC + NAT Gateway is not required.** Lambda execution environment is already isolated. The HIPAA requirement for network controls is satisfied by IAM policies, encryption in transit (TLS), and CloudTrail auditing — no VPC needed. This saves ~$39/mo compared to a VPC-based approach.
 
 ### One-Time
 
@@ -155,27 +154,33 @@ These have no direct AWS cost but require organizational investment:
 | Feature | Estimated Effort |
 |---------|-----------------|
 | Multi-tenant auth + MFA | 2-3 weeks |
-| VPC migration for all Lambdas | 1 week |
 | KMS encryption integration | 3-5 days |
 | Log scrubbing in SSR Lambda | 1-2 weeks |
-| WAF rules + IP allowlisting | 2-3 days |
+| WAF rules + IP allowlisting (optional) | 2-3 days |
 | CloudTrail + Config setup | 1 day |
+| Data retention policies (S3 lifecycle, CW log retention) | 1-2 days |
 | Automated backup/restore testing | 3-5 days |
 | Documentation + policy writing | 1 week |
-| **Total dev effort** | **6-10 weeks** |
+| **Total dev effort** | **5-8 weeks** |
 
 ---
 
 ## 9. Recommended Priority Order
 
-1. **Phase 1 (Week 1-2)** — Sign BAA, enable CloudTrail, Config, KMS encryption, DynamoDB PITR, S3 versioning
-2. **Phase 2 (Week 3-5)** — VPC + NAT Gateway + VPC endpoints, WAF, move Lambdas into VPC
-3. **Phase 3 (Week 6-8)** — Multi-tenant auth with MFA, session management, SSO support
-4. **Phase 4 (Week 9-10)** — Log scrubbing, penetration testing, policy documentation
+1. **Phase 1 (Week 1-2)** — Sign BAA, enable CloudTrail, Config, KMS encryption, DynamoDB PITR, S3 versioning, CloudWatch log retention policies
+2. **Phase 2 (Week 3-5)** — Multi-tenant auth with MFA, session management, SSO support, WAF rules
+3. **Phase 3 (Week 6-8)** — Log scrubbing in SSR Lambda, penetration testing, policy documentation
 
 ---
 
-## 10. Things That Stay the Same
+## 10. TL;DR
+
+- **AWS cost increase:** ~**+$22/mo** (KMS $1, WAF $6, CloudTrail $7, Config $3, PITR $5)
+- **One-time compliance costs:** ~**$15k–$60k** (risk assessment, pen-test, policy writing)
+- **Dev effort:** ~**5-8 weeks** (auth, KMS, log scrubbing, backup testing)
+- **VPC + NAT Gateway NOT required** — Lambda isolation + IAM + TLS is sufficient for HIPAA network controls
+
+## 11. Things That Stay the Same
 
 - CloudFront dashboard (no Lambda@Edge)
 - API Gateway (HIPAA-eligible)
